@@ -1,40 +1,54 @@
 load("@bazel_skylib//lib:shell.bzl", "shell")
+load("@aspect_bazel_lib//lib:expand_make_vars.bzl", "expand_variables")
+load("@aspect_bazel_lib//lib:paths.bzl", "BASH_RLOCATION_FUNCTION", "to_rlocation_path")
+load("@aspect_bazel_lib//lib:windows_utils.bzl", "create_windows_native_launcher_script", "BATCH_RLOCATION_FUNCTION")
 
-_CONTENT_PREFIX = """#!/usr/bin/env bash
+# Note: BASH_RLOCATION_FUNCTION 
+# docs: https://github.com/bazelbuild/bazel/blob/master/tools/bash/runfiles/runfiles.bash
+# set RUNFILES_LIB_DEBUG=1 to debug
 
-# --- begin runfiles.bash initialization v2 ---
-# Copy-pasted from the Bazel Bash runfiles library v2.
-set -uo pipefail; f=bazel_tools/tools/bash/runfiles/runfiles.bash
-source "${RUNFILES_DIR:-/dev/null}/$f" 2>/dev/null || \\
- source "$(grep -sm1 "^$f " "${RUNFILES_MANIFEST_FILE:-/dev/null}" | cut -f2- -d' ')" 2>/dev/null || \\
- source "$0.runfiles/$f" 2>/dev/null || \\
- source "$(grep -sm1 "^$f " "$0.runfiles_manifest" | cut -f2- -d' ')" 2>/dev/null || \\
- source "$(grep -sm1 "^$f " "$0.exe.runfiles_manifest" | cut -f2- -d' ')" 2>/dev/null || \\
- { echo>&2 "ERROR: cannot find $f"; exit 1; }; f=; set -e
-# --- end runfiles.bash initialization v2 ---
+_MULTIRUN_LAUNCHER_TMPL = """#!/usr/bin/env bash
+set -o errexit -o nounset -o pipefail
+{BASH_RLOCATION_FUNCTION}
+{envs}
 
-# Export RUNFILES_* envvars (and a couple more) for subprocesses.
-runfiles_export_envvars
+readonly command_path="$(rlocation {command})"
+readonly instructions_path="$(rlocation {instructions})"
 
+echo exec $command_path -f $instructions_path
+exec $command_path -f $instructions_path
 """
 
+_COMMAND_LAUNCHER_TMPL = """#!/usr/bin/env bash
+set -o errexit -o nounset -o pipefail
+{BASH_RLOCATION_FUNCTION}
+{envs}
+
+readonly command_path="$(rlocation {command})"
+exec $command_path {args}
+"""
+
+_COMMAND_LAUNCHER_BAT_TMPL = """@echo off
+SETLOCAL ENABLEEXTENSIONS
+SETLOCAL ENABLEDELAYEDEXPANSION
+set RUNFILES_MANIFEST_ONLY=1
+{BATCH_RLOCATION_FUNCTION}
+call :rlocation "{sh_script}" run_script
+{envs}
+
+call :rlocation "{command}" command_path
+$command_path {args}
+"""
+
+_ENV_SET = """export {key}=\"{value}\""""
+
 def _multirun_impl(ctx):
-    instructions_file = ctx.actions.declare_file(ctx.label.name + ".json")
+    is_windows = ctx.target_platform_has_constraint(ctx.attr._windows_constraint[platform_common.ConstraintValueInfo])
     runnerInfo = ctx.attr._runner[DefaultInfo]
     runner_exe = runnerInfo.files_to_run.executable
 
-    runfiles = ctx.runfiles(files = [instructions_file, runner_exe])
-    runfiles = runfiles.merge(ctx.attr._bash_runfiles[DefaultInfo].default_runfiles)
-    runfiles = runfiles.merge(runnerInfo.default_runfiles)
-
-    for data_dep in ctx.attr.data:
-        default_runfiles = data_dep[DefaultInfo].default_runfiles
-        if default_runfiles != None:
-            runfiles = runfiles.merge(default_runfiles)
-
     commands = []
     tagged_commands = []
-    runfiles_files = []
     for command in ctx.attr.commands:
         tagged_commands.append(struct(tag = str(command.label), command = command))
 
@@ -51,14 +65,10 @@ def _multirun_impl(ctx):
         exe = defaultInfo.files_to_run.executable
         if exe == None:
             fail("%s does not have an executable file" % command.label, attr = "commands")
-        runfiles_files.append(exe)
 
-        default_runfiles = defaultInfo.default_runfiles
-        if default_runfiles != None:
-            runfiles = runfiles.merge(default_runfiles)
         commands.append(struct(
             tag = tag,
-            path = exe.short_path,
+            path = to_rlocation_path(ctx, exe),
         ))
 
     if ctx.attr.jobs < 0:
@@ -86,22 +96,46 @@ def _multirun_impl(ctx):
         addTag = ctx.attr.add_tag,
         stopOnError = ctx.attr.stop_on_error,
     )
+    instructions_file = ctx.actions.declare_file(ctx.label.name + ".json")
     ctx.actions.write(
         output = instructions_file,
         content = instructions.to_json(),
     )
+    print("instructions: "+instructions.to_json())
 
-    script = 'exec ./%s -f %s "$@"\n' % (shell.quote(runner_exe.short_path), shell.quote(instructions_file.short_path))
-    out_file = ctx.actions.declare_file(ctx.label.name + ".bash")
+    envs = []
+    # See https://www.msys2.org/wiki/Porting/:
+    # > Setting MSYS2_ARG_CONV_EXCL=* prevents any path transformation.
+    if is_windows:
+        envs.append(_ENV_SET.format(
+            key = "MSYS2_ARG_CONV_EXCL",
+            value = "*",
+        ))
+        envs.append(_ENV_SET.format(
+            key = "MSYS_NO_PATHCONV",
+            value = "1",
+        ))
+
+    bash_launcher = ctx.actions.declare_file(ctx.label.name + ".sh")
     ctx.actions.write(
-        output = out_file,
-        content = _CONTENT_PREFIX + script,
+        output = bash_launcher,
+        content = _MULTIRUN_LAUNCHER_TMPL.format(
+            envs = "\n".join(envs),
+            command = to_rlocation_path(ctx, ctx.executable._runner),
+            instructions = to_rlocation_path(ctx, instructions_file),
+            BASH_RLOCATION_FUNCTION = BASH_RLOCATION_FUNCTION,
+        ),
         is_executable = True,
     )
+
+    launcher = create_windows_native_launcher_script(ctx, bash_launcher) if is_windows else bash_launcher
+
+    runfiles = ctx.runfiles(ctx.files._runner + ctx.files.commands + ctx.files.tagged_commands + ctx.files.data + [bash_launcher, instructions_file])
+    runfiles = runfiles.merge(ctx.attr._runfiles.default_runfiles)
+
     return [DefaultInfo(
-        files = depset([out_file]),
-        runfiles = runfiles.merge(ctx.runfiles(files = runfiles_files + ctx.files.data)),
-        executable = out_file,
+        runfiles = runfiles,
+        executable = launcher,
     )]
 
 _multirun = rule(
@@ -145,15 +179,21 @@ _multirun = rule(
             default = True,
             doc = "Stop the command chain when error occurs",
         ),
-        "_bash_runfiles": attr.label(
-            default = Label("@bazel_tools//tools/bash/runfiles"),
+        "_runfiles": attr.label(
+            default = "@bazel_tools//tools/bash/runfiles",
         ),
         "_runner": attr.label(
             default = Label("@com_github_ash2k_bazel_tools//multirun"),
             cfg = "exec",
             executable = True,
         ),
+        "_windows_constraint": attr.label(
+            default = "@platforms//os:windows",
+        ),
     },
+    toolchains = [
+        "@bazel_tools//tools/sh:toolchain_type",
+    ],
     executable = True,
 )
 
@@ -167,46 +207,53 @@ def multirun(**kwargs):
     )
 
 def _command_impl(ctx):
-    runfiles = ctx.runfiles().merge(ctx.attr._bash_runfiles[DefaultInfo].default_runfiles)
-
-    for data_dep in ctx.attr.data:
-        default_runfiles = data_dep[DefaultInfo].default_runfiles
-        if default_runfiles != None:
-            runfiles = runfiles.merge(default_runfiles)
-
+    is_windows = ctx.target_platform_has_constraint(ctx.attr._windows_constraint[platform_common.ConstraintValueInfo])
     defaultInfo = ctx.attr.command[DefaultInfo]
     executable = defaultInfo.files_to_run.executable
 
-    default_runfiles = defaultInfo.default_runfiles
-    if default_runfiles != None:
-        runfiles = runfiles.merge(default_runfiles)
+    envs = []
+    for (key, value) in ctx.attr.environment.items() + ctx.attr.raw_environment.items():
+        envs.append(_ENV_SET.format(
+            key = key,
+            value = " ".join([expand_variables(ctx, exp, attribute_name = "env") for exp in ctx.expand_location(value, targets = ctx.attr.data).split(" ")]),
+        ))
+    # See https://www.msys2.org/wiki/Porting/:
+    # > Setting MSYS2_ARG_CONV_EXCL=* prevents any path transformation.
+    if is_windows:
+        envs.append(_ENV_SET.format(
+            key = "MSYS2_ARG_CONV_EXCL",
+            value = "*",
+        ))
+        envs.append(_ENV_SET.format(
+            key = "MSYS_NO_PATHCONV",
+            value = "1",
+        ))
 
-    expansion_targets = ctx.attr.data
-
-    str_env = [
-        "export %s=%s" % (k, shell.quote(ctx.expand_location(v, targets = expansion_targets)))
-        for k, v in ctx.attr.environment.items()
-    ]
-    str_unqouted_env = [
-        "export %s=%s" % (k, ctx.expand_location(v, targets = expansion_targets))
-        for k, v in ctx.attr.raw_environment.items()
-    ]
     str_args = [
-        "%s" % shell.quote(ctx.expand_location(v, targets = expansion_targets))
+        "%s" % shell.quote(ctx.expand_location(v, targets = ctx.attr.data))
         for v in ctx.attr.arguments
     ]
-    command_exec = " ".join(["exec ./%s" % shell.quote(executable.short_path)] + str_args + ['"$@"\n'])
-
-    out_file = ctx.actions.declare_file(ctx.label.name + ".bash")
+        
+    bash_launcher = ctx.actions.declare_file(ctx.label.name + ".sh")
     ctx.actions.write(
-        output = out_file,
-        content = "\n".join([_CONTENT_PREFIX] + str_env + str_unqouted_env + [command_exec]),
+        output = bash_launcher,
+        content = _COMMAND_LAUNCHER_TMPL.format(
+            envs = "\n".join(envs),
+            command = to_rlocation_path(ctx, executable),
+            args = " ".join(str_args + ['"$@"']),
+            BASH_RLOCATION_FUNCTION = BASH_RLOCATION_FUNCTION,
+        ),
         is_executable = True,
     )
+
+    launcher = create_windows_native_launcher_script(ctx, bash_launcher) if is_windows else bash_launcher
+
+    runfiles = ctx.runfiles(ctx.files.command + ctx.files.data + [bash_launcher])
+    runfiles = runfiles.merge(ctx.attr._runfiles.default_runfiles)
+
     return [DefaultInfo(
-        files = depset([out_file]),
-        runfiles = runfiles.merge(ctx.runfiles(files = ctx.files.data + [executable])),
-        executable = out_file,
+        runfiles = runfiles,
+        executable = launcher,
     )]
 
 _command = rule(
@@ -223,7 +270,7 @@ _command = rule(
             doc = "Dictionary of environment variables. Subject to $(location) expansion. See https://docs.bazel.build/versions/master/skylark/lib/ctx.html#expand_location",
         ),
         "raw_environment": attr.string_dict(
-            doc = "Dictionary of unqouted environment variables. Subject to $(location) expansion. See https://docs.bazel.build/versions/master/skylark/lib/ctx.html#expand_location",
+            doc = "Dictionary of unquoted environment variables. Subject to $(location) expansion. See https://docs.bazel.build/versions/master/skylark/lib/ctx.html#expand_location",
         ),
         "command": attr.label(
             mandatory = True,
@@ -232,10 +279,12 @@ _command = rule(
             doc = "Target to run",
             cfg = "target",
         ),
-        "_bash_runfiles": attr.label(
-            default = Label("@bazel_tools//tools/bash/runfiles"),
-        ),
+        "_runfiles": attr.label(default = "@bazel_tools//tools/bash/runfiles"),
+        "_windows_constraint": attr.label(default = "@platforms//os:windows"),
     },
+    toolchains = [
+        "@bazel_tools//tools/sh:toolchain_type",
+    ],
     executable = True,
 )
 
