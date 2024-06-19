@@ -1,1 +1,2 @@
 common --noenable_bzlmod
+startup --windows_enable_symlinks

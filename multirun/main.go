@@ -11,17 +11,31 @@ import (
 	"os/exec"
 	"os/signal"
 	"syscall"
+
+	"github.com/bazelbuild/rules_go/go/tools/bazel"
 )
 
 const (
 	maxLineSize = 1 * 1024 * 1024
 )
 
+func debugEnv() {
+	value := os.Getenv("RUNFILES_MANIFEST_FILE")
+    fmt.Println("multirun startup, RUNFILES_MANIFEST_FILE="+value)
+
+	// Check that the files can be listed.
+	entries, _ := bazel.ListRunfiles()
+	for _, e := range entries {
+		fmt.Println(e.ShortPath, e.Path)
+	}
+}
+
 func main() {
 	var args arguments
 	flag.StringVar(&args.instructionsFile, "f", "", "file with instructions")
 	flag.Parse()
 	args.args = flag.Args()
+	//debugEnv()
 	ctx, cancelFunc := context.WithCancel(context.Background())
 	defer cancelFunc()
 	cancelOnInterrupt(ctx, cancelFunc)

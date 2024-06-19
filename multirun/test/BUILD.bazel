@@ -136,11 +136,14 @@ sh_test(
         # there.
         "'$(location :multirun_parallel_failure) | sort'",
         "5",
-        "$(location expected_parallel_failure.txt)",
-    ],
+    ] + select({
+        "@platforms//os:windows": ["$(location expected_parallel_failure_windows.txt)"],
+        "//conditions:default": ["$(location expected_parallel_failure.txt)"],
+    }),
     data = [
-        "expected_parallel_failure.txt",
         ":multirun_parallel_failure",
+        "expected_parallel_failure_windows.txt",
+        "expected_parallel_failure.txt",
     ],
 )
 
@@ -289,11 +292,13 @@ sh_test(
     srcs = ["test_compare_content.sh"],
     args = [
         "'$(location :run_and_kill) $(location :multirun_parallel_signal_handling) 2 SIGTERM'",
-        "255",
-        "$(location expected_parallel_sigterm.txt)",
-    ],
+    ] + select({
+        "@platforms//os:windows": ["143", "$(location expected_parallel_sigterm_windows.txt)"],
+        "//conditions:default": ["255", "$(location expected_parallel_sigterm.txt)"],
+    }),
     data = [
         "expected_parallel_sigterm.txt",
+        "expected_parallel_sigterm_windows.txt",
         ":multirun_parallel_signal_handling",
         ":run_and_kill",
     ],
@@ -305,11 +310,13 @@ sh_test(
     srcs = ["test_compare_content.sh"],
     args = [
         "'$(location :run_and_kill) $(location :multirun_parallel_signal_handling) 2 SIGINT'",
-        "255",
-        "$(location expected_parallel_sigint.txt)",
-    ],
+    ] + select({
+        "@platforms//os:windows": ["130", "$(location expected_parallel_sigint_windows.txt)"],
+        "//conditions:default": ["255", "$(location expected_parallel_sigint.txt)"],
+    }),
     data = [
         "expected_parallel_sigint.txt",
+        "expected_parallel_sigint_windows.txt",
         ":multirun_parallel_signal_handling",
         ":run_and_kill",
     ],
@@ -321,13 +328,15 @@ sh_test(
     srcs = ["test_compare_content.sh"],
     args = [
         "'$(location :run_and_kill) $(location :multirun_signal_handling) 2 SIGTERM'",
-        "255",
-        "$(location expected_sigterm.txt)",
-    ],
+    ] + select({
+        "@platforms//os:windows": ["143", "$(location expected_sigterm_windows.txt)"],
+        "//conditions:default": ["255", "$(location expected_sigterm.txt)"],
+    }),
     data = [
-        "expected_sigterm.txt",
         ":multirun_signal_handling",
         ":run_and_kill",
+        "expected_sigterm_windows.txt",
+        "expected_sigterm.txt"
     ],
 )
 
@@ -337,13 +346,15 @@ sh_test(
     srcs = ["test_compare_content.sh"],
     args = [
         "'$(location :run_and_kill) $(location :multirun_signal_handling) 2 SIGINT'",
-        "255",
-        "$(location expected_sigint.txt)",
-    ],
+    ] + select({
+        "@platforms//os:windows": ["130", "$(location expected_sigint_windows.txt)"],
+        "//conditions:default": ["255", "$(location expected_sigint.txt)"],
+    }),
     data = [
-        "expected_sigint.txt",
         ":multirun_signal_handling",
         ":run_and_kill",
+        "expected_sigint_windows.txt",
+        "expected_sigint.txt",
     ],
 )
 

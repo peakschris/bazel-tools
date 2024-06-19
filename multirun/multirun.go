@@ -5,7 +5,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"sync"
+
+	"github.com/bazelbuild/rules_go/go/tools/bazel"
 )
 
 type multirun struct {
@@ -31,6 +34,21 @@ func (m multirun) run(ctx context.Context) error {
 	return m.boundedExecution(ctx)
 }
 
+func (m multirun) Runfile(path string) (string, error) {
+	fullPath, err1 := bazel.Runfile(path)
+	if err1 != nil {
+		strippedPath := strings.SplitN(path, "/", 2)[1]
+		fullPath2, err2 := bazel.Runfile(strippedPath)
+		if err2 != nil {
+			fmt.Fprintf(m.stderrSink, "Failed to lookup runfile for %s %s\n", path, err1.Error())
+			fmt.Fprintf(m.stderrSink, "also tried %s %s\n", strippedPath, err2.Error())
+			return "", err1
+		}
+		fullPath = fullPath2
+	}
+	return fullPath, nil
+}
+
 // unboundedExecution execute multiple commands without concurrency limit
 func (m multirun) unboundedExecution(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
@@ -38,9 +56,14 @@ func (m multirun) unboundedExecution(ctx context.Context) error {
 	errs := make(chan error)
 
 	for _, cmd := range m.commands {
+		fullPath, err := m.Runfile(cmd.Path)
+		if err != nil {
+			fmt.Fprintf(m.stderrSink, "Failed to lookup runfile for %s %s\n", cmd.Path, err.Error())
+			return err
+		}
 		p := process{
 			tag:        cmd.Tag,
-			path:       cmd.Path,
+			path:       fullPath,
 			stdoutSink: m.stdoutSink,
 			stderrSink: m.stderrSink,
 			args:       m.args,
@@ -115,9 +138,14 @@ func (m multirun) spawnWorker(ctx context.Context, commands <-chan command, errs
 			return true
 		default:
 		}
+		fullPath, err := m.Runfile(cmd.Path)
+		if err != nil {
+			fmt.Fprintf(m.stderrSink, "Failed to lookup runfile for %s %s\n", cmd.Path, err.Error())
+			return true
+		}
 		p := process{
 			tag:  cmd.Tag,
-			path: cmd.Path,
+			path: fullPath,
 			// nil means "the process reads from the null device (os.DevNull)", see the godoc. We do this explicitly to show the intent.
 			stdin:      nil,
 			stdoutSink: m.stdoutSink,
@@ -139,7 +167,7 @@ func (m multirun) spawnWorker(ctx context.Context, commands <-chan command, errs
 			fmt.Fprintf(m.stderrSink, "Running %s\n", cmd.Tag)
 		}
 
-		err := p.run(ctx)
+		err = p.run(ctx)
 		if err != nil {
 			errs <- err
 			if m.stopOnError {

@@ -1,7 +1,7 @@
 load("@bazel_skylib//lib:shell.bzl", "shell")
 load("@aspect_bazel_lib//lib:expand_make_vars.bzl", "expand_variables")
 load("@aspect_bazel_lib//lib:paths.bzl", "BASH_RLOCATION_FUNCTION", "to_rlocation_path")
-load("@aspect_bazel_lib//lib:windows_utils.bzl", "create_windows_native_launcher_script", "BATCH_RLOCATION_FUNCTION")
+load(":windows_utils.bzl", "create_windows_native_launcher_script", "BATCH_RLOCATION_FUNCTION")
 
 # Note: BASH_RLOCATION_FUNCTION 
 # docs: https://github.com/bazelbuild/bazel/blob/master/tools/bash/runfiles/runfiles.bash
@@ -15,8 +15,23 @@ set -o errexit -o nounset -o pipefail
 readonly command_path="$(rlocation {command})"
 readonly instructions_path="$(rlocation {instructions})"
 
-echo exec $command_path -f $instructions_path
+::echo exec $command_path -f $instructions_path
 exec $command_path -f $instructions_path
+"""
+
+_MULTIRUN_LAUNCHER_BAT_TMPL = """@echo off
+SETLOCAL ENABLEEXTENSIONS
+SETLOCAL ENABLEDELAYEDEXPANSION
+set RUNFILES_MANIFEST_ONLY=1
+set RUNFILES_LIB_DEBUG=0
+{BATCH_RLOCATION_FUNCTION}
+{envs}
+
+call :rlocation "{command}" command_path
+call :rlocation "{instructions}" instructions_path
+::echo RUNFILES_MANIFEST_FILE=!RUNFILES_MANIFEST_FILE!
+::echo %command_path% -f %instructions_path%
+%command_path% -f %instructions_path%
 """
 
 _COMMAND_LAUNCHER_TMPL = """#!/usr/bin/env bash
@@ -25,6 +40,7 @@ set -o errexit -o nounset -o pipefail
 {envs}
 
 readonly command_path="$(rlocation {command})"
+::echo RUNFILES_MANIFEST_FILE=!RUNFILES_MANIFEST_FILE!
 exec $command_path {args}
 """
 
@@ -32,15 +48,27 @@ _COMMAND_LAUNCHER_BAT_TMPL = """@echo off
 SETLOCAL ENABLEEXTENSIONS
 SETLOCAL ENABLEDELAYEDEXPANSION
 set RUNFILES_MANIFEST_ONLY=1
+set RUNFILES_LIB_DEBUG=0
 {BATCH_RLOCATION_FUNCTION}
-call :rlocation "{sh_script}" run_script
 {envs}
 
 call :rlocation "{command}" command_path
-$command_path {args}
+::echo RUNFILES_MANIFEST_FILE=!RUNFILES_MANIFEST_FILE!
+::echo {exec}%command_path% {args}
+{exec}%command_path% {args}
 """
 
 _ENV_SET = """export {key}=\"{value}\""""
+_BAT_ENV_SET = """set {key}={value}"""
+
+def _command_exe(command):
+    defaultInfo = command[DefaultInfo]
+    if defaultInfo.files_to_run == None:
+        fail("%s is not executable" % command.label, attr = "commands")
+    exe = defaultInfo.files_to_run.executable
+    if exe == None:
+        fail("%s does not have an executable file" % command.label, attr = "commands")
+    return exe
 
 def _multirun_impl(ctx):
     is_windows = ctx.target_platform_has_constraint(ctx.attr._windows_constraint[platform_common.ConstraintValueInfo])
@@ -55,19 +83,12 @@ def _multirun_impl(ctx):
     for command, label in ctx.attr.tagged_commands.items():
         tagged_commands.append(struct(tag = label, command = command))
 
-    for tag_command in tagged_commands:
-        command = tag_command.command
-        tag = tag_command.tag
-
-        defaultInfo = command[DefaultInfo]
-        if defaultInfo.files_to_run == None:
-            fail("%s is not executable" % command.label, attr = "commands")
-        exe = defaultInfo.files_to_run.executable
-        if exe == None:
-            fail("%s does not have an executable file" % command.label, attr = "commands")
-
+    runfiles_files = []
+    for entry in tagged_commands:
+        exe = _command_exe(entry.command)
+        runfiles_files.append(exe)
         commands.append(struct(
-            tag = tag,
+            tag = entry.tag,
             path = to_rlocation_path(ctx, exe),
         ))
 
@@ -101,37 +122,44 @@ def _multirun_impl(ctx):
         output = instructions_file,
         content = instructions.to_json(),
     )
-    print("instructions: "+instructions.to_json())
 
-    envs = []
-    # See https://www.msys2.org/wiki/Porting/:
-    # > Setting MSYS2_ARG_CONV_EXCL=* prevents any path transformation.
-    if is_windows:
-        envs.append(_ENV_SET.format(
-            key = "MSYS2_ARG_CONV_EXCL",
-            value = "*",
-        ))
-        envs.append(_ENV_SET.format(
-            key = "MSYS_NO_PATHCONV",
-            value = "1",
-        ))
+    command_path = to_rlocation_path(ctx, ctx.executable._runner)
+    instructions_path = to_rlocation_path(ctx, instructions_file)
 
-    bash_launcher = ctx.actions.declare_file(ctx.label.name + ".sh")
-    ctx.actions.write(
-        output = bash_launcher,
-        content = _MULTIRUN_LAUNCHER_TMPL.format(
-            envs = "\n".join(envs),
-            command = to_rlocation_path(ctx, ctx.executable._runner),
-            instructions = to_rlocation_path(ctx, instructions_file),
-            BASH_RLOCATION_FUNCTION = BASH_RLOCATION_FUNCTION,
-        ),
-        is_executable = True,
-    )
+    if not is_windows:
+        launcher = ctx.actions.declare_file(ctx.label.name + ".sh")
+        ctx.actions.write(
+            output = launcher,
+            content = _MULTIRUN_LAUNCHER_TMPL.format(
+                envs = "",
+                command = command_path,
+                instructions = instructions_path,
+                BASH_RLOCATION_FUNCTION = BASH_RLOCATION_FUNCTION,
+            ),
+            is_executable = True,
+        )
+    else:
+        launcher = ctx.actions.declare_file(ctx.label.name + ".bat")
+        ctx.actions.write(
+            output = launcher,
+            content = _MULTIRUN_LAUNCHER_BAT_TMPL.format(
+                envs = "",
+                command = command_path,
+                instructions = instructions_path,
+                BATCH_RLOCATION_FUNCTION = BATCH_RLOCATION_FUNCTION,
+            ),
+            is_executable = True,
+        )
 
-    launcher = create_windows_native_launcher_script(ctx, bash_launcher) if is_windows else bash_launcher
-
-    runfiles = ctx.runfiles(ctx.files._runner + ctx.files.commands + ctx.files.tagged_commands + ctx.files.data + [bash_launcher, instructions_file])
+    runfiles = ctx.runfiles(ctx.files._runner + ctx.files.commands + ctx.files.tagged_commands + ctx.files.data + [launcher, instructions_file])
     runfiles = runfiles.merge(ctx.attr._runfiles.default_runfiles)
+    runfiles = runfiles.merge(ctx.attr._runner[DefaultInfo].default_runfiles)
+    runfiles = runfiles.merge(ctx.runfiles(files=runfiles_files))
+
+    for tag_command in tagged_commands:
+        runfiles = runfiles.merge(tag_command.command[DefaultInfo].default_runfiles)
+    for data_dep in ctx.attr.data:
+        runfiles = runfiles.merge(data_dep[DefaultInfo].default_runfiles)
 
     return [DefaultInfo(
         runfiles = runfiles,
@@ -147,6 +175,7 @@ _multirun = rule(
             allow_files = True,
             doc = "Targets to run",
             cfg = "target",
+            providers = [DefaultInfo],
         ),
         "data": attr.label_list(
             doc = "The list of files needed by the commands at runtime. See general comments about `data` at https://docs.bazel.build/versions/master/be/common-definitions.html#common-attributes",
@@ -211,45 +240,66 @@ def _command_impl(ctx):
     defaultInfo = ctx.attr.command[DefaultInfo]
     executable = defaultInfo.files_to_run.executable
 
-    envs = []
-    for (key, value) in ctx.attr.environment.items() + ctx.attr.raw_environment.items():
-        envs.append(_ENV_SET.format(
-            key = key,
-            value = " ".join([expand_variables(ctx, exp, attribute_name = "env") for exp in ctx.expand_location(value, targets = ctx.attr.data).split(" ")]),
-        ))
-    # See https://www.msys2.org/wiki/Porting/:
-    # > Setting MSYS2_ARG_CONV_EXCL=* prevents any path transformation.
-    if is_windows:
-        envs.append(_ENV_SET.format(
-            key = "MSYS2_ARG_CONV_EXCL",
-            value = "*",
-        ))
-        envs.append(_ENV_SET.format(
-            key = "MSYS_NO_PATHCONV",
-            value = "1",
-        ))
-
     str_args = [
         "%s" % shell.quote(ctx.expand_location(v, targets = ctx.attr.data))
         for v in ctx.attr.arguments
     ]
-        
-    bash_launcher = ctx.actions.declare_file(ctx.label.name + ".sh")
-    ctx.actions.write(
-        output = bash_launcher,
-        content = _COMMAND_LAUNCHER_TMPL.format(
-            envs = "\n".join(envs),
-            command = to_rlocation_path(ctx, executable),
-            args = " ".join(str_args + ['"$@"']),
-            BASH_RLOCATION_FUNCTION = BASH_RLOCATION_FUNCTION,
-        ),
-        is_executable = True,
-    )
 
-    launcher = create_windows_native_launcher_script(ctx, bash_launcher) if is_windows else bash_launcher
+    #expansion_targets = ctx.attr.data
+    #str_env = [
+    #    "export %s=%s" % (k, shell.quote(ctx.expand_location(v, targets = expansion_targets)))
+    #    for k, v in ctx.attr.environment.items()
+    #]
+    #str_unqouted_env = [
+    #    "export %s=%s" % (k, ctx.expand_location(v, targets = expansion_targets))
+    #    for k, v in ctx.attr.raw_environment.items()
+    #]
+    
+    if not is_windows:
+        envs = []
+        for (key, value) in ctx.attr.environment.items() + ctx.attr.raw_environment.items():
+            envs.append(_ENV_SET.format(
+                key = key,
+                value = " ".join([expand_variables(ctx, exp, attribute_name = "env") for exp in ctx.expand_location(value, targets = ctx.attr.data)]),
+            ))
+            
+        launcher = ctx.actions.declare_file(ctx.label.name + ".sh")
+        ctx.actions.write(
+            output = launcher,
+            content = _COMMAND_LAUNCHER_TMPL.format(
+                envs = "\n".join(envs),
+                command = to_rlocation_path(ctx, executable),
+                args = " ".join(str_args + ['"$@"']),
+                BASH_RLOCATION_FUNCTION = BASH_RLOCATION_FUNCTION,
+            ),
+            is_executable = True,
+        )
+    else:
+        envs = []
+        for (key, value) in ctx.attr.environment.items() + ctx.attr.raw_environment.items():
+            envs.append(_BAT_ENV_SET.format(
+                key = key,
+                value = " ".join([expand_variables(ctx, exp, attribute_name = "env") for exp in ctx.expand_location(value, targets = ctx.attr.data).split(" ")]),
+            ))
+            
+        launcher = ctx.actions.declare_file(ctx.label.name + ".bat")
+        ctx.actions.write(
+            output = launcher,
+            content = _COMMAND_LAUNCHER_BAT_TMPL.format(
+                envs = "\n".join(envs),
+                exec = "%BAZEL_SH% " if executable.extension == "bash" or executable.extension == "sh" else "",
+                command = to_rlocation_path(ctx, executable),
+                args = " ".join(str_args),
+                BATCH_RLOCATION_FUNCTION = BATCH_RLOCATION_FUNCTION,
+            ),
+            is_executable = True,
+        )
 
-    runfiles = ctx.runfiles(ctx.files.command + ctx.files.data + [bash_launcher])
+    runfiles = ctx.runfiles(ctx.files.command + ctx.files.data + [launcher])
     runfiles = runfiles.merge(ctx.attr._runfiles.default_runfiles)
+    runfiles = runfiles.merge(ctx.attr.command[DefaultInfo].default_runfiles)
+    for data_dep in ctx.attr.data:
+        runfiles = runfiles.merge(data_dep[DefaultInfo].default_runfiles)
 
     return [DefaultInfo(
         runfiles = runfiles,

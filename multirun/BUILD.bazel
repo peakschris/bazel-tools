@@ -8,6 +8,7 @@ go_library(
         "process.go",
     ],
     importpath = "github.com/ash2k/bazel-tools/multirun",
+    deps = ["@io_bazel_rules_go//go/tools/bazel:go_default_library"],
     visibility = ["//visibility:private"],
 )
 
@@ -15,7 +16,7 @@ go_binary(
     name = "multirun",
     embed = [":go_default_library"],
     msan = "off",
-    pure = "off",
+    #pure = "off",
     race = "off",
     static = "off",
     visibility = ["//visibility:public"],

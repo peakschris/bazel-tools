@@ -5,7 +5,10 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"runtime"
+	"strings"
 	"sync"
 	"syscall"
 )
@@ -22,10 +25,20 @@ type process struct {
 	addTag bool
 }
 
+// launch in bash
+func shellLauncher(path string, args []string) (string, []string) {
+	if runtime.GOOS == "windows" && (strings.HasSuffix(path, ".bash") || strings.HasSuffix(path, ".sh")) {
+		args = append([]string{path}, args...)
+		return os.Getenv("BAZEL_SH"), args
+	}
+	return path, args
+}
+
 func (p *process) run(ctx context.Context) error {
+	launch, args := shellLauncher(p.path, p.args)
 	cmd := &exec.Cmd{
-		Path: p.path,
-		Args: append([]string{p.path}, p.args...),
+		Path: launch,
+		Args: append([]string{launch}, args...),
 		// nil means "use environment of the parent process", see the godoc. We do this explicitly to show the intent.
 		Env:   nil,
 		Stdin: p.stdin,
@@ -69,10 +82,16 @@ func (p *process) run(ctx context.Context) error {
 		defer wg2.Done()
 		select {
 		case <-ctx.Done(): // process should be terminated earlier
-			if err := cmd.Process.Signal(syscall.SIGTERM); err != nil && !isFinished(err) {
-				_, _ = fmt.Fprintf(p.stderrSink, "[multirun:%s] Failed to send SIGTERM, sending SIGKILL\n", p.tag)
-				if err = cmd.Process.Kill(); err != nil && !isFinished(err) {
-					_, _ = fmt.Fprintf(p.stderrSink, "[multirun:%s] Failed to send SIGKILL\n", p.tag)
+			if (runtime.GOOS != "windows") {
+				if err := cmd.Process.Signal(syscall.SIGTERM); err != nil && !isFinished(err) {
+					_, _ = fmt.Fprintf(p.stderrSink, "[multirun:%s] Failed to send SIGTERM, sending SIGKILL (%s)\n", p.tag, err.Error())
+					if err = cmd.Process.Kill(); err != nil && !isFinished(err) {
+						_, _ = fmt.Fprintf(p.stderrSink, "[multirun:%s] Failed to send SIGKILL (%s)\n", p.tag, err.Error())
+					}
+				}
+			} else {
+				if err := cmd.Process.Kill(); err != nil && !isFinished(err) {
+					_, _ = fmt.Fprintf(p.stderrSink, "[multirun:%s] Failed to send SIGKILL (%s)\n", p.tag, err.Error())
 				}
 			}
 		case <-done:
