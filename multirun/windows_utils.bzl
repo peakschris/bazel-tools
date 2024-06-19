@@ -35,27 +35,33 @@ if "%~2" equ "" (
   echo ERROR: Expected two arguments for rlocation function. 1>&2 1>&2
   exit 1
 )
-if "%RUNFILES_MANIFEST_ONLY%" neq "1" (
-  set "convert=%~1"
-  set "%~2=!convert:/=\!
-  exit /b 0
+
+:: if set outside this script, these variables may have unix paths. Update to windows.
+if not "%RUNFILES_MANIFEST_FILE%"=="" (
+    set RUNFILES_MANIFEST_FILE=!RUNFILES_MANIFEST_FILE:/=\!
 )
-if exist "%RUNFILES_DIR%" (
-  set RUNFILES_MANIFEST_FILE=%RUNFILES_DIR%_manifest
+if not "%RUNFILES_DIR%"=="" (
+    set RUNFILES_DIR=!RUNFILES_DIR:/=\!
 )
-if not exist "%RUNFILES_MANIFEST_FILE%" (
-  set RUNFILES_MANIFEST_FILE=%~f0.runfiles_manifest
+if not "%RUNFILES_REPO_MAPPING%"=="" (
+    set RUNFILES_REPO_MAPPING=!RUNFILES_REPO_MAPPING:/=\!
 )
-if "%RUNFILES_MANIFEST_FILE%" equ "" (
-  set RUNFILES_MANIFEST_FILE=%~f0.runfiles\MANIFEST
+
+set GOT_RF=0
+if not "%RUNFILES_DIR%"=="" if exist "%RUNFILES_DIR%" (set GOT_RF=1)
+if not "%RUNFILES_MANIFEST_FILE%"=="" if exist "%RUNFILES_MANIFEST_FILE%" (set GOT_RF=1)
+if "%GOT_RF%"=="0" (
+    if exist "%~f0.runfiles_manifest" (
+        set "RUNFILES_MANIFEST_FILE=%~f0.runfiles_manifest"
+    ) else if exist "%~f0.runfiles\MANIFEST" (
+        set "RUNFILES_MANIFEST_FILE=%~f0.runfiles\MANIFEST"
+    ) else if exist "%~f0.runfiles" (
+        set "RUNFILES_DIR=%~f0.runfiles"
+    )
 )
+
 if not exist "%RUNFILES_REPO_MAPPING%" (
   set RUNFILES_REPO_MAPPING=%~f0.repo_mapping
-)
-set MF=!RUNFILES_MANIFEST_FILE:/=\!
-if not exist "!MF!" (
-  echo ERROR: Manifest file !MF! does not exist. 1>&2
-  exit 1
 )
 if "!RUNFILES_LIB_DEBUG!"=="1" (
     echo RUNFILES_LIB_DEBUG=!RUNFILES_LIB_DEBUG! 1>&2
@@ -72,13 +78,14 @@ set _RLOCATION_GREP_CASE_INSENSITIVE_ARGS=-i
 if "!RUNFILES_LIB_DEBUG!"=="1" (
     echo INFO[runfiles.bat]: rlocation(%1^): start 1>&2
 )
+
 REM Check if the path is absolute
 if "%~f1"=="%1" (
     if "!RUNFILES_LIB_DEBUG!"=="1" (
         echo INFO[runfiles.bat]: rlocation(%1^): absolute path, return 1>&2
     )
     set "convert=%~1"
-    set "%~2=!convert:/=\!
+    set "%~2=!convert:/=\!"
     exit /b 0
 )
 REM Check if the path is not normalized
@@ -138,7 +145,12 @@ if exist "%RUNFILES_REPO_MAPPING%" (
 
 set "rlocation_checked_out="
 call :runfiles_rlocation_checked !rlocation_path! rlocation_checked_out
-set %~2=%rlocation_checked_out:/=\%
+if not "%rlocation_checked_out%"=="" (
+    set "%~2=%rlocation_checked_out:/=\%"
+)
+if "!RUNFILES_LIB_DEBUG!"=="1" (
+    echo INFO[runfiles.bat]: rlocation(%1^): returning (%~2) 1>&2
+)
 exit /b 0
 :: End of rlocation
 
@@ -170,7 +182,7 @@ if "!RUNFILES_LIB_DEBUG!"=="1" (
 
 set "rlocation_path="
 
-if exist "!MF!" (
+if exist "%RUNFILES_MANIFEST_FILE%" (
     REM Escape caller_path for use in the findstr regex below. Also replace \ with / since the manifest
     REM uses / as the path separator even on Windows.
     set "normalized_caller_path=!caller_path:\=/!"
@@ -192,7 +204,7 @@ if exist "!MF!" (
             if "!RUNFILES_LIB_DEBUG!"=="1" (
                 echo INFO[runfiles.bat]: runfiles_current_repository(!idx!^): (!normalized_caller_path!^) lies in repository (!repository!^) (parsed exec path^) 1>&2
             )
-            set %~2=!repository!
+            set "%~2=!repository!"
         ) else (
             if "!RUNFILES_LIB_DEBUG!"=="1" (
                 echo INFO[runfiles.bat]: runfiles_current_repository(!idx!^): (!normalized_caller_path!^) lies in the main repository (parsed exec path^) 1>&2
@@ -209,7 +221,7 @@ if exist "!MF!" (
 
 if "!rlocation_path!"=="" if exist "%RUNFILES_DIR%" (
     set "normalized_caller_path=!caller_path:\=/!"
-    set "normalized_dir=!RUNFILES_DIR:/=!"
+    set "normalized_dir=!RUNFILES_DIR:/=\!"
     rem if not "!_RLOCATION_GREP_CASE_INSENSITIVE_ARGS!"=="" (
     rem     for /f "tokens=*" %%a in ('echo !normalized_caller_path! ^| tr "[:upper:]" "[:lower:]"') do ( 1>&2
     rem         set "normalized_caller_path=%%a"
@@ -237,7 +249,7 @@ if "!rlocation_path!"=="" if exist "%RUNFILES_DIR%" (
             if "!RUNFILES_LIB_DEBUG!"=="1" (
                 echo ERROR[runfiles.bat]: runfiles_current_repository(!idx!^): (!normalized_caller_path!^) lies in repository (!repository!^) (parsed exec path^) 1>&2
             )
-            set %~2=!repository!
+            set "%~2=!repository!"
         ) else (
             if "!RUNFILES_LIB_DEBUG!"=="1" (
                 echo ERROR[runfiles.bat]: runfiles_current_repository(!idx!^): (!normalized_caller_path!^) lies in the main repository (parsed exec path^) 1>&2
@@ -288,11 +300,11 @@ exit /b
 :: end of runfiles_current_repository
 
 :runfiles_rlocation_checked
-if exist "!RUNFILES_DIR!\%~1" (
+if exist "!RUNFILES_DIR!\%~1" if not exist "!RUNFILES_MANIFEST_FILE!" (
     if "!RUNFILES_LIB_DEBUG!"=="1" (
         echo INFO[runfiles.bat]: rlocation(%~1^): found under RUNFILES_DIR (!RUNFILES_DIR!^), return 1>&2
     )
-    set %~2="!RUNFILES_DIR!\%~1"
+    set "%~2=!RUNFILES_DIR!\%~1"
     exit /b 0
 ) else if exist "!RUNFILES_MANIFEST_FILE!" (
     if "!RUNFILES_LIB_DEBUG!"=="1" (
@@ -328,7 +340,7 @@ if exist "!RUNFILES_DIR!\%~1" (
             if "!RUNFILES_LIB_DEBUG!"=="1" (
                 echo INFO[runfiles.bat]: rlocation(%~1^): found in manifest as (!candidate!^) via prefix (!prefix!^) 1>&2
             )
-            set %~2="!candidate!"
+            set %~2=!candidate!
             exit /b 0
         )
         REM At this point, the manifest lookup of prefix has been successful,
@@ -356,7 +368,7 @@ if exist "!RUNFILES_DIR!\%~1" (
             if "!RUNFILES_LIB_DEBUG!"=="1" (
                 echo INFO[runfiles.bat]: rlocation(%~1^): found in manifest as (!result!^) 1>&2
             )
-            set %~2="!result!"
+            set "%~2=!result!"
             exit /b 0
         ) else (
             if "!RUNFILES_LIB_DEBUG!"=="1" (
@@ -375,6 +387,17 @@ if exist "!RUNFILES_DIR!\%~1" (
 ::end of runfiles_rlocation_checked
 
 :end
+:: leave these variables set with forward slashes, for compatibility with any 
+:: bash runfile calls made downstream
+if not "%RUNFILES_MANIFEST_FILE%"=="" (
+    set RUNFILES_MANIFEST_FILE=%RUNFILES_MANIFEST_FILE:\=/%
+)
+if not "%RUNFILES_DIR%"=="" (
+    set RUNFILES_DIR=%RUNFILES_DIR:\=/%
+)
+if not "%RUNFILES_REPO_MAPPING%"=="" (
+    set RUNFILES_REPO_MAPPING=%RUNFILES_REPO_MAPPING:\=/%
+)
 """
 
 def create_windows_native_launcher_script(ctx, shell_script):

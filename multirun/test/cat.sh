@@ -12,5 +12,5 @@ source "${RUNFILES_DIR:-/dev/null}/$f" 2>/dev/null || \
   { echo>&2 "ERROR: cannot find $f"; exit 1; }; f=; set -e
 # --- end runfiles.bash initialization v3 ---
 
-cat "$1"
+cat "$(rlocation $1)"
 cat "$(rlocation com_github_ash2k_bazel_tools/multirun/test/cat2.txt)"

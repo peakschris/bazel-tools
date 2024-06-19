@@ -15,20 +15,21 @@ set -o errexit -o nounset -o pipefail
 readonly command_path="$(rlocation {command})"
 readonly instructions_path="$(rlocation {instructions})"
 
-::echo exec $command_path -f $instructions_path
+#echo multirun sh launcher
+#echo exec $command_path -f $instructions_path
 exec $command_path -f $instructions_path
 """
 
 _MULTIRUN_LAUNCHER_BAT_TMPL = """@echo off
 SETLOCAL ENABLEEXTENSIONS
 SETLOCAL ENABLEDELAYEDEXPANSION
-set RUNFILES_MANIFEST_ONLY=1
 set RUNFILES_LIB_DEBUG=0
 {BATCH_RLOCATION_FUNCTION}
 {envs}
 
 call :rlocation "{command}" command_path
 call :rlocation "{instructions}" instructions_path
+::echo multirun bat launcher
 ::echo RUNFILES_MANIFEST_FILE=!RUNFILES_MANIFEST_FILE!
 ::echo %command_path% -f %instructions_path%
 %command_path% -f %instructions_path%
@@ -40,19 +41,21 @@ set -o errexit -o nounset -o pipefail
 {envs}
 
 readonly command_path="$(rlocation {command})"
-::echo RUNFILES_MANIFEST_FILE=!RUNFILES_MANIFEST_FILE!
+#echo command sh launcher
+#echo RUNFILES_MANIFEST_FILE=!RUNFILES_MANIFEST_FILE!
+#echo $command_path {args}
 exec $command_path {args}
 """
 
 _COMMAND_LAUNCHER_BAT_TMPL = """@echo off
 SETLOCAL ENABLEEXTENSIONS
 SETLOCAL ENABLEDELAYEDEXPANSION
-set RUNFILES_MANIFEST_ONLY=1
 set RUNFILES_LIB_DEBUG=0
 {BATCH_RLOCATION_FUNCTION}
 {envs}
 
 call :rlocation "{command}" command_path
+::echo command bat launcher
 ::echo RUNFILES_MANIFEST_FILE=!RUNFILES_MANIFEST_FILE!
 ::echo {exec}%command_path% {args}
 {exec}%command_path% {args}
@@ -235,15 +238,15 @@ def multirun(**kwargs):
         **kwargs
     )
 
+def _cmd_quote(s):
+    # todo: escape existing quotes
+    return '"'+s+'"'
+
 def _command_impl(ctx):
     is_windows = ctx.target_platform_has_constraint(ctx.attr._windows_constraint[platform_common.ConstraintValueInfo])
     defaultInfo = ctx.attr.command[DefaultInfo]
     executable = defaultInfo.files_to_run.executable
 
-    str_args = [
-        "%s" % shell.quote(ctx.expand_location(v, targets = ctx.attr.data))
-        for v in ctx.attr.arguments
-    ]
 
     #expansion_targets = ctx.attr.data
     #str_env = [
@@ -254,7 +257,19 @@ def _command_impl(ctx):
     #    "export %s=%s" % (k, ctx.expand_location(v, targets = expansion_targets))
     #    for k, v in ctx.attr.raw_environment.items()
     #]
-    
+
+    shell_type = "bash" if not is_windows or executable.extension in ["bash", "sh"] else "cmd"
+    if (shell_type == "bash"):
+        str_args = [
+            "%s" % shell.quote(ctx.expand_location(v, targets = ctx.attr.data))
+            for v in ctx.attr.arguments
+        ]
+    else:
+        str_args = [
+            "%s" % _cmd_quote(ctx.expand_location(v, targets = ctx.attr.data))
+            for v in ctx.attr.arguments
+        ]
+
     if not is_windows:
         envs = []
         for (key, value) in ctx.attr.environment.items() + ctx.attr.raw_environment.items():
